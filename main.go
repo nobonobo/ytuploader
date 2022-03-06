@@ -35,17 +35,21 @@ func (o *output) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func proc(ctx context.Context, file string) error {
+func proc(ctx context.Context, dir, secrets, file string) error {
 	log.Println("upload:", file)
-	args := []string{"./youtubeuploader"}
+	cache := filepath.Join(dir, "request.token")
+	args := []string{"youtubeuploader"}
+	args = append(args, "-secrets", secrets)
+	args = append(args, "-cache", cache)
 	args = append(args, "-filename", file)
 	args = append(args, "-notify", "false")
 	args = append(args, "-language", "ja")
-	args = append(args, "-chunksize", "268435456") // 256MiB
+	args = append(args, "-chunksize", "0") // infinite
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	log.Print(strings.Join(args, " "))
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = &output{timer: time.AfterFunc(30*time.Second, cancel)}
 	buff := bytes.NewBuffer(nil)
 	cmd.Stderr = buff
@@ -67,7 +71,7 @@ func proc(ctx context.Context, file string) error {
 	return nil
 }
 
-func check(ctx context.Context, src string) error {
+func check(ctx context.Context, dir, secrets, src string) error {
 	files, err := filepath.Glob(src + "/*.mp4")
 	if err != nil {
 		return err
@@ -83,7 +87,7 @@ func check(ctx context.Context, src string) error {
 		return srcs[i] < srcs[j]
 	})
 	for _, file := range srcs {
-		if err := proc(ctx, file); err != nil {
+		if err := proc(ctx, dir, secrets, file); err != nil {
 			return err
 		}
 	}
@@ -91,7 +95,17 @@ func check(ctx context.Context, src string) error {
 }
 
 func main() {
-	secrets := "client_secrets.json"
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatal(err)
+	}
+	dir := filepath.Join(home, ".youtubeuploader")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		if !os.IsExist(err) {
+			log.Fatal(err)
+		}
+	}
+	secrets := filepath.Join(dir, "client_secrets.json")
 	flag.StringVar(&secrets, "secrets", secrets, "path to json file for client secrets")
 	src := "."
 	flag.StringVar(&src, "src", src, "src directory")
@@ -109,16 +123,20 @@ func main() {
 	if err := watcher.Add(absSrc); err != nil {
 		log.Fatal(err)
 	}
+	log.Println("checking...")
+	if err := check(ctx, dir, secrets, src); err != nil {
+		log.Print(err)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case event := <-watcher.Events:
-			log.Println("event:", event)
 			if event.Op.String() == "CREATE" {
+				log.Println("event:", event)
 				log.Println("checking...")
-				if err := check(ctx, src); err != nil {
-					log.Fatalln(err)
+				if err := check(ctx, dir, secrets, src); err != nil {
+					log.Print(err)
 				}
 			}
 		}
